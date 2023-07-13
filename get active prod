@@ -1,0 +1,64 @@
+#!/bin/bash
+set -euo pipefail
+elb1="ac52a861d1cec42e3854f775ed3be47e-108197509.eu-central-1.elb.amazonaws.com"
+elb1_0="acd9f12b22c5f4f5ea6f224f4ea73c4d-1275682926.eu-central-1.elb.amazonaws.com"
+elb2="adf9189a0bd594a11ae5a2e62eaab085-139621336.eu-central-1.elb.amazonaws.com"
+elb2_0="a9fc41f7620004118916d8455d4526e2-500690705.eu-central-1.elb.amazonaws.com"
+file_path="/var/lib/jenkins/sites-prod-cloudfront"
+
+if dig "$dns" NS | grep 'NS' | grep -E 'aws|cloudflare' ; then
+	echo "start of check"
+else echo "domain not in cloudflare and cloudfront, aboting..."
+	exit 1
+fi
+
+# Считывание списка сайтов в клаудфронт
+readarray -t array < "$file_path"
+echo "$dns"
+for i in "${array[@]}"
+do
+  if [ "$i" = "$dns" ]; then
+    echo 'domain in cloudfront'
+    if [[ $dns == "www.metadialog.com" ]]; then
+      DistributionID=$(aws cloudfront list-distributions --query 'DistributionList.Items[].{Id: Id, AlternativeDomainNames: Aliases.Items}' | jq --arg domain "$dns" '.[] | select(.AlternativeDomainNames[]? == $domain) | .Id' | tr -d '"')
+      elb=$(aws cloudfront get-distribution --id $DistributionID | jq .Distribution.DistributionConfig.Origins.Items[].DomainName | tr -d '"')
+      break
+    else
+      DistributionID=$(aws --profile bookstime cloudfront list-distributions | jq --arg domain "$dns" '.[] | select(.AlternativeDomainNames[]? == $domain) | .Id' | tr -d '"')
+      elb=$(aws --profile bookstime cloudfront get-distribution --id $DistributionID | jq .Distribution.DistributionConfig.Origins.Items[].DomainName)
+      break
+    fi
+
+  else
+    echo "domain not in cloudront, try cloudflare"
+    test=$(echo ${dns} | cut -d. -f3)
+    if [ -z "${test}" ]; then
+      domain=$(echo ${dns} | cut -d. -f1)
+    else
+      domain=$(echo ${dns} | cut -d. -f2)
+    fi
+
+    all_domains=$(curl -sS -X  GET "https://api.cloudflare.com/client/v4/zones?name=contains:$domain" \
+                 -H "Authorization: Bearer $token" -H "Content-Type: application/json" | jq -r '.result[].name')
+    ar_domains=(${all_domains// / })
+    echo "List Of Domains: ${ar_domains[@]}"
+    echo ""
+    for dom in "${ar_domains[@]}"; do
+    zone_id=$(curl -sS -X  GET "https://api.cloudflare.com/client/v4/zones?name=$dom" \
+                -H "Authorization: Bearer $token" -H "Content-Type: application/json" | jq -r '.result[0].id')
+    elb=$(curl -sS -X  GET "https://api.cloudflare.com/client/v4/zones/$zone_id/dns_records?name=$dom" \
+             -H "Authorization: Bearer $token" -H "Content-Type: application/json" | jq -r '.result[0].content')  
+    done 
+    break
+  fi
+done
+
+if [[ "$elb" == "$elb1" ]] || [[ "$elb" == "$elb1_0" ]];
+  then
+    echo "$dns - PROD-1"
+  elif [[ "$elb" == "$elb2" ]] || [[ "$elb" == "$elb2_0" ]];
+  then
+    echo "$dns - PROD-2"
+  else
+   echo "$dns - Wrong answer from CF"
+  fi
